@@ -1,0 +1,92 @@
+name: Weekly X Competitor Feedback
+
+# 毎週月曜 7:30 JST (= 日曜 22:30 UTC) に実行。
+# 日次ワークフロー(22:00 UTC)がその日のレポートをcommitし終えた後に走るよう30分ずらしている。
+# 加えて手動実行も可能。
+on:
+  schedule:
+    - cron: '30 22 * * 0'   # 日曜 22:30 UTC = 月曜 7:30 JST
+  workflow_dispatch:          # 手動トリガー有効化
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write         # 週次レポートをcommitするために必要
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run weekly feedback pipeline
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # メール(SMTP)配信設定。Gmailの場合はアプリパスワードを使う。
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
+        run: |
+          python scripts/weekly_feedback.py
+
+      - name: Commit and push weekly report
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions Bot"
+          git add weekly_reports/
+          if git diff --staged --quiet; then
+            echo "No new weekly report to commit"
+          else
+            git commit -m "Weekly report: $(date -u +'%Y-%m-%d' --date='9 hours')"
+            git push
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: |
+          python - <<'PY'
+          import os, smtplib
+          from email.mime.text import MIMEText
+          user = os.environ.get("SMTP_USER"); pwd = os.environ.get("SMTP_PASS")
+          to = os.environ.get("MAIL_TO")
+          if user and pwd and to:
+              host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+              port = int(os.environ.get("SMTP_PORT", "465"))
+              msg = MIMEText("週次競合分析ワークフローが失敗しました。GitHub Actionsのログを確認してください。", "plain", "utf-8")
+              msg["Subject"] = "⚠️ 週次競合分析ワークフロー失敗"
+              msg["From"] = user; msg["To"] = to
+              srv = smtplib.SMTP_SSL(host, port) if port == 465 else smtplib.SMTP(host, port)
+              with srv:
+                  if port != 465: srv.starttls()
+                  srv.login(user, pwd)
+                  srv.sendmail(user, [a.strip() for a in to.split(",")], msg.as_string())
+              print("Failure notification sent")
+          else:
+              print("SMTP creds not set; skip failure notification")
+          PY
