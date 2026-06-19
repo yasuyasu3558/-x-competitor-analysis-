@@ -55,7 +55,7 @@
     "max_buzz_count": 3,
     "max_trend_count": 3,
     "post_proposals_count": 3,
-    "max_my_posts": 200,
-    "max_my_post_chars": 500
+    "max_reference_items": 200,
+    "max_reference_chars": 500
   }
 }

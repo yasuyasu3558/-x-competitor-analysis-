@@ -2,10 +2,9 @@
 """
 Daily X Competitor Analysis - Free Version
 GitHub Actions上で毎朝7:00 JSTに実行される。
-4アカウントのRSSを取得 + 自分の過去投稿(my_posts/)を読み込み → Gemini APIで分析 → Telegramに配信。
+4アカウントのRSSを取得 + 参考データ(x_reference/)を読み込み → Gemini APIで分析 → Telegramに配信。
 """
 
-import csv
 import json
 import os
 import re
@@ -17,11 +16,13 @@ import feedparser
 import google.generativeai as genai
 import requests
 
+from reference import load_reference_posts
+
 # プロジェクトルート
 ROOT = Path(__file__).parent.parent
 
-# 自分の過去X投稿を置くフォルダ
-MY_POSTS_DIR = ROOT / "my_posts"
+# ローカルの「Xについて」フォルダの同期先（過去のX投稿・参考データ）
+X_REFERENCE_DIR = ROOT / "x_reference"
 
 # JST タイムゾーン
 JST = timezone(timedelta(hours=9))
@@ -31,81 +32,6 @@ def load_config() -> dict:
     """設定ファイルを読み込み"""
     with open(ROOT / "config" / "competitors.json", encoding="utf-8") as f:
         return json.load(f)
-
-
-def load_my_posts(max_posts: int = 200, max_chars_each: int = 500) -> list[dict]:
-    """
-    自分の過去X投稿を my_posts/ フォルダから読み込む。
-    ローカルで管理している過去投稿をこのフォルダに入れてpushすれば、
-    次回の自動実行から「過去記事情報」としてAIに渡される。
-
-    対応形式:
-      - .txt / .md : 1ファイル1投稿。1ファイルに複数入れる場合は「---」だけの行で区切る
-      - .json      : ["本文", ...] か [{"text": "本文", "posted_at": "..."}] か {"posts": [...]}
-      - .csv       : ヘッダに text / tweet / 本文 のいずれかの列を含む
-    """
-    if not MY_POSTS_DIR.exists():
-        print(f"  my_posts/ フォルダが無いためスキップ")
-        return []
-
-    posts: list[dict] = []
-    for path in sorted(MY_POSTS_DIR.glob("**/*")):
-        if path.is_dir():
-            continue
-        if path.name.startswith(".") or path.name.lower() == "readme.md":
-            continue
-
-        suffix = path.suffix.lower()
-        try:
-            if suffix == ".json":
-                data = json.loads(path.read_text(encoding="utf-8"))
-                items = data if isinstance(data, list) else data.get("posts", [])
-                for it in items:
-                    if isinstance(it, dict):
-                        text = str(it.get("text", "")).strip()
-                        posted_at = str(it.get("posted_at", ""))
-                    else:
-                        text, posted_at = str(it).strip(), ""
-                    if text:
-                        posts.append({
-                            "text": text[:max_chars_each],
-                            "posted_at": posted_at,
-                            "source": path.name,
-                        })
-
-            elif suffix == ".csv":
-                with open(path, encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        text = (row.get("text") or row.get("tweet") or row.get("本文") or "").strip()
-                        posted_at = (row.get("posted_at") or row.get("date") or row.get("日付") or "")
-                        if text:
-                            posts.append({
-                                "text": text[:max_chars_each],
-                                "posted_at": posted_at,
-                                "source": path.name,
-                            })
-
-            else:  # .txt / .md / その他テキスト
-                raw = path.read_text(encoding="utf-8")
-                # 「---」だけの行で複数投稿に分割。区切りが無ければ全体を1投稿扱い
-                for chunk in re.split(r"\n-{3,}\n", raw):
-                    text = chunk.strip()
-                    if text:
-                        posts.append({
-                            "text": text[:max_chars_each],
-                            "posted_at": "",
-                            "source": path.name,
-                        })
-
-        except Exception as e:
-            print(f"  Skip {path.name}: {e}")
-
-        if len(posts) >= max_posts:
-            break
-
-    print(f"  My past posts loaded: {len(posts)} (from {MY_POSTS_DIR})")
-    return posts[:max_posts]
 
 
 def fetch_rss_with_fallback(rss_endpoints: list[str], lookback_hours: int, max_posts: int) -> list[dict]:
@@ -198,7 +124,7 @@ def analyze_with_gemini(posts_data: dict, my_posts: list[dict], system_prompt: s
     posts_text = json.dumps(posts_data, ensure_ascii=False, indent=2)
     my_posts_text = (
         json.dumps(my_posts, ensure_ascii=False, indent=2)
-        if my_posts else "（過去投稿データなし。my_posts/ フォルダにファイルを追加すると参照されます）"
+        if my_posts else "（参考データなし。x_reference/ フォルダにファイルを追加すると参照されます）"
     )
     today_jp = datetime.now(JST).strftime("%Y年%m月%d日")
 
@@ -368,12 +294,14 @@ def main():
     total_posts = sum(len(p["posts"]) for p in posts_data["posts_data"])
     print(f"\nTotal competitor posts retrieved: {total_posts}")
 
-    # 3. 自分の過去投稿を読み込み
-    print("\n[2/5] Loading my past posts...")
-    my_posts = load_my_posts(
-        max_posts=settings.get("max_my_posts", 200),
-        max_chars_each=settings.get("max_my_post_chars", 500),
+    # 3. 参考データ（x_reference/＝ローカルの「Xについて」フォルダ）を読み込み
+    print("\n[2/5] Loading X reference data...")
+    my_posts = load_reference_posts(
+        X_REFERENCE_DIR,
+        max_items=settings.get("max_reference_items", 200),
+        max_chars=settings.get("max_reference_chars", 500),
     )
+    print(f"  Reference items loaded: {len(my_posts)} (from {X_REFERENCE_DIR})")
 
     # 4. プロンプト読み込み
     system_prompt = (ROOT / "prompts" / "system_prompt.txt").read_text(encoding="utf-8")
