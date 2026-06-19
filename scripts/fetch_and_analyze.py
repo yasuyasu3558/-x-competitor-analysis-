@@ -2,9 +2,10 @@
 """
 Daily X Competitor Analysis - Free Version
 GitHub Actions上で毎朝7:00 JSTに実行される。
-4アカウントのRSSを取得→Gemini APIで分析→Telegramに配信。
+4アカウントのRSSを取得 + 自分の過去投稿(my_posts/)を読み込み → Gemini APIで分析 → Telegramに配信。
 """
 
+import csv
 import json
 import os
 import re
@@ -19,6 +20,9 @@ import requests
 # プロジェクトルート
 ROOT = Path(__file__).parent.parent
 
+# 自分の過去X投稿を置くフォルダ
+MY_POSTS_DIR = ROOT / "my_posts"
+
 # JST タイムゾーン
 JST = timezone(timedelta(hours=9))
 
@@ -27,6 +31,81 @@ def load_config() -> dict:
     """設定ファイルを読み込み"""
     with open(ROOT / "config" / "competitors.json", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_my_posts(max_posts: int = 200, max_chars_each: int = 500) -> list[dict]:
+    """
+    自分の過去X投稿を my_posts/ フォルダから読み込む。
+    ローカルで管理している過去投稿をこのフォルダに入れてpushすれば、
+    次回の自動実行から「過去記事情報」としてAIに渡される。
+
+    対応形式:
+      - .txt / .md : 1ファイル1投稿。1ファイルに複数入れる場合は「---」だけの行で区切る
+      - .json      : ["本文", ...] か [{"text": "本文", "posted_at": "..."}] か {"posts": [...]}
+      - .csv       : ヘッダに text / tweet / 本文 のいずれかの列を含む
+    """
+    if not MY_POSTS_DIR.exists():
+        print(f"  my_posts/ フォルダが無いためスキップ")
+        return []
+
+    posts: list[dict] = []
+    for path in sorted(MY_POSTS_DIR.glob("**/*")):
+        if path.is_dir():
+            continue
+        if path.name.startswith(".") or path.name.lower() == "readme.md":
+            continue
+
+        suffix = path.suffix.lower()
+        try:
+            if suffix == ".json":
+                data = json.loads(path.read_text(encoding="utf-8"))
+                items = data if isinstance(data, list) else data.get("posts", [])
+                for it in items:
+                    if isinstance(it, dict):
+                        text = str(it.get("text", "")).strip()
+                        posted_at = str(it.get("posted_at", ""))
+                    else:
+                        text, posted_at = str(it).strip(), ""
+                    if text:
+                        posts.append({
+                            "text": text[:max_chars_each],
+                            "posted_at": posted_at,
+                            "source": path.name,
+                        })
+
+            elif suffix == ".csv":
+                with open(path, encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        text = (row.get("text") or row.get("tweet") or row.get("本文") or "").strip()
+                        posted_at = (row.get("posted_at") or row.get("date") or row.get("日付") or "")
+                        if text:
+                            posts.append({
+                                "text": text[:max_chars_each],
+                                "posted_at": posted_at,
+                                "source": path.name,
+                            })
+
+            else:  # .txt / .md / その他テキスト
+                raw = path.read_text(encoding="utf-8")
+                # 「---」だけの行で複数投稿に分割。区切りが無ければ全体を1投稿扱い
+                for chunk in re.split(r"\n-{3,}\n", raw):
+                    text = chunk.strip()
+                    if text:
+                        posts.append({
+                            "text": text[:max_chars_each],
+                            "posted_at": "",
+                            "source": path.name,
+                        })
+
+        except Exception as e:
+            print(f"  Skip {path.name}: {e}")
+
+        if len(posts) >= max_posts:
+            break
+
+    print(f"  My past posts loaded: {len(posts)} (from {MY_POSTS_DIR})")
+    return posts[:max_posts]
 
 
 def fetch_rss_with_fallback(rss_endpoints: list[str], lookback_hours: int, max_posts: int) -> list[dict]:
@@ -107,7 +186,7 @@ def gather_all_posts(config: dict) -> dict:
     }
 
 
-def analyze_with_gemini(posts_data: dict, system_prompt: str, user_prompt_template: str) -> str:
+def analyze_with_gemini(posts_data: dict, my_posts: list[dict], system_prompt: str, user_prompt_template: str) -> str:
     """Gemini APIで分析レポートを生成"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -117,10 +196,15 @@ def analyze_with_gemini(posts_data: dict, system_prompt: str, user_prompt_templa
 
     # データを整形
     posts_text = json.dumps(posts_data, ensure_ascii=False, indent=2)
+    my_posts_text = (
+        json.dumps(my_posts, ensure_ascii=False, indent=2)
+        if my_posts else "（過去投稿データなし。my_posts/ フォルダにファイルを追加すると参照されます）"
+    )
     today_jp = datetime.now(JST).strftime("%Y年%m月%d日")
 
     user_prompt = user_prompt_template \
         .replace("{POSTS_DATA}", posts_text) \
+        .replace("{MY_PAST_POSTS}", my_posts_text) \
         .replace("{TODAY_JP}", today_jp)
 
     # gemini-2.5-flash は無料枠が大きい
@@ -275,28 +359,36 @@ def main():
 
     # 1. 設定読み込み
     config = load_config()
+    settings = config["settings"]
 
-    # 2. RSS取得
-    print("\n[1/4] Fetching RSS feeds...")
+    # 2. RSS取得（競合）
+    print("\n[1/5] Fetching RSS feeds...")
     posts_data = gather_all_posts(config)
 
     total_posts = sum(len(p["posts"]) for p in posts_data["posts_data"])
-    print(f"\nTotal posts retrieved: {total_posts}")
+    print(f"\nTotal competitor posts retrieved: {total_posts}")
 
-    # 3. プロンプト読み込み
+    # 3. 自分の過去投稿を読み込み
+    print("\n[2/5] Loading my past posts...")
+    my_posts = load_my_posts(
+        max_posts=settings.get("max_my_posts", 200),
+        max_chars_each=settings.get("max_my_post_chars", 500),
+    )
+
+    # 4. プロンプト読み込み
     system_prompt = (ROOT / "prompts" / "system_prompt.txt").read_text(encoding="utf-8")
     user_prompt_template = (ROOT / "prompts" / "user_prompt_template.txt").read_text(encoding="utf-8")
 
-    # 4. Gemini分析
-    print("\n[2/4] Calling Gemini API...")
-    markdown_report = analyze_with_gemini(posts_data, system_prompt, user_prompt_template)
+    # 5. Gemini分析
+    print("\n[3/5] Calling Gemini API...")
+    markdown_report = analyze_with_gemini(posts_data, my_posts, system_prompt, user_prompt_template)
 
-    # 5. 保存
-    print("\n[3/4] Saving report...")
-    report_path = save_report(markdown_report)
+    # 6. 保存
+    print("\n[4/5] Saving report...")
+    save_report(markdown_report)
 
-    # 6. 配信
-    print("\n[4/4] Sending notifications...")
+    # 7. 配信
+    print("\n[5/5] Sending notifications...")
     short = make_short_version(markdown_report)
     one_push = extract_one_push(markdown_report)
     repo_url = os.environ.get("GITHUB_SERVER_URL", "") + "/" + os.environ.get("GITHUB_REPOSITORY", "")
