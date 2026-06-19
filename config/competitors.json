@@ -1,0 +1,61 @@
+{
+  "competitors": [
+    {
+      "id": "@agent_shinomiya",
+      "username": "agent_shinomiya",
+      "label": "四宮浩二｜経営者枠",
+      "position": "経営者×深い (右上)",
+      "rss_endpoints": [
+        "https://rsshub.app/twitter/user/agent_shinomiya",
+        "https://rsshub.rssforever.com/twitter/user/agent_shinomiya"
+      ]
+    },
+    {
+      "id": "@taisan33015X",
+      "username": "taisan33015X",
+      "label": "たい｜脱サラ成功枠",
+      "position": "初心者×軽い (左下)",
+      "rss_endpoints": [
+        "https://rsshub.app/twitter/user/taisan33015X",
+        "https://rsshub.rssforever.com/twitter/user/taisan33015X"
+      ]
+    },
+    {
+      "id": "@oka_shigodeki",
+      "username": "oka_shigodeki",
+      "label": "おか｜情報量勝負枠",
+      "position": "中央 (深い×初心者寄り)",
+      "rss_endpoints": [
+        "https://rsshub.app/twitter/user/oka_shigodeki",
+        "https://rsshub.rssforever.com/twitter/user/oka_shigodeki"
+      ]
+    },
+    {
+      "id": "@yuyafkugyo",
+      "username": "yuyafkugyo",
+      "label": "Y｜AI副業枠",
+      "position": "初心者×軽い (左下)",
+      "rss_endpoints": [
+        "https://rsshub.app/twitter/user/yuyafkugyo",
+        "https://rsshub.rssforever.com/twitter/user/yuyafkugyo"
+      ]
+    }
+  ],
+  "user_profile": {
+    "role": "代表取締役・マーケティングコンサル兼生成AI活用アドバイザー",
+    "experience": "マーケコンサル11年",
+    "differentiation": "経営者×実務深掘り(B2B・中小企業向け)",
+    "target": "中小企業経営者・個人事業主・副業ガチ勢(B2B寄り)",
+    "tone": "一人称・体験談ベース・経営者目線",
+    "hashtags": "#起業 #生成AI #マーケティング #経営者"
+  },
+  "settings": {
+    "lookback_hours": 24,
+    "max_posts_per_account": 10,
+    "max_buzz_count": 3,
+    "max_trend_count": 3,
+    "post_proposals_count": 3,
+    "max_reference_items": 200,
+    "max_reference_chars": 500
+  }
+}

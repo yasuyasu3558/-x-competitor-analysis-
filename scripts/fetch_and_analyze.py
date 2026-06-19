@@ -2,7 +2,7 @@
 """
 Daily X Competitor Analysis - Free Version
 GitHub Actions上で毎朝7:00 JSTに実行される。
-4アカウントのRSSを取得→Gemini APIで分析→Telegramに配信。
+4アカウントのRSSを取得 + 参考データ(x_reference/)を読み込み → Gemini APIで分析 → Telegramに配信。
 """
 
 import json
@@ -16,8 +16,13 @@ import feedparser
 import google.generativeai as genai
 import requests
 
+from reference import load_reference_posts
+
 # プロジェクトルート
 ROOT = Path(__file__).parent.parent
+
+# ローカルの「Xについて」フォルダの同期先（過去のX投稿・参考データ）
+X_REFERENCE_DIR = ROOT / "x_reference"
 
 # JST タイムゾーン
 JST = timezone(timedelta(hours=9))
@@ -107,7 +112,7 @@ def gather_all_posts(config: dict) -> dict:
     }
 
 
-def analyze_with_gemini(posts_data: dict, system_prompt: str, user_prompt_template: str) -> str:
+def analyze_with_gemini(posts_data: dict, my_posts: list[dict], system_prompt: str, user_prompt_template: str) -> str:
     """Gemini APIで分析レポートを生成"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -117,10 +122,15 @@ def analyze_with_gemini(posts_data: dict, system_prompt: str, user_prompt_templa
 
     # データを整形
     posts_text = json.dumps(posts_data, ensure_ascii=False, indent=2)
+    my_posts_text = (
+        json.dumps(my_posts, ensure_ascii=False, indent=2)
+        if my_posts else "（参考データなし。x_reference/ フォルダにファイルを追加すると参照されます）"
+    )
     today_jp = datetime.now(JST).strftime("%Y年%m月%d日")
 
     user_prompt = user_prompt_template \
         .replace("{POSTS_DATA}", posts_text) \
+        .replace("{MY_PAST_POSTS}", my_posts_text) \
         .replace("{TODAY_JP}", today_jp)
 
     # gemini-2.5-flash は無料枠が大きい
@@ -275,28 +285,38 @@ def main():
 
     # 1. 設定読み込み
     config = load_config()
+    settings = config["settings"]
 
-    # 2. RSS取得
-    print("\n[1/4] Fetching RSS feeds...")
+    # 2. RSS取得（競合）
+    print("\n[1/5] Fetching RSS feeds...")
     posts_data = gather_all_posts(config)
 
     total_posts = sum(len(p["posts"]) for p in posts_data["posts_data"])
-    print(f"\nTotal posts retrieved: {total_posts}")
+    print(f"\nTotal competitor posts retrieved: {total_posts}")
 
-    # 3. プロンプト読み込み
+    # 3. 参考データ（x_reference/＝ローカルの「Xについて」フォルダ）を読み込み
+    print("\n[2/5] Loading X reference data...")
+    my_posts = load_reference_posts(
+        X_REFERENCE_DIR,
+        max_items=settings.get("max_reference_items", 200),
+        max_chars=settings.get("max_reference_chars", 500),
+    )
+    print(f"  Reference items loaded: {len(my_posts)} (from {X_REFERENCE_DIR})")
+
+    # 4. プロンプト読み込み
     system_prompt = (ROOT / "prompts" / "system_prompt.txt").read_text(encoding="utf-8")
     user_prompt_template = (ROOT / "prompts" / "user_prompt_template.txt").read_text(encoding="utf-8")
 
-    # 4. Gemini分析
-    print("\n[2/4] Calling Gemini API...")
-    markdown_report = analyze_with_gemini(posts_data, system_prompt, user_prompt_template)
+    # 5. Gemini分析
+    print("\n[3/5] Calling Gemini API...")
+    markdown_report = analyze_with_gemini(posts_data, my_posts, system_prompt, user_prompt_template)
 
-    # 5. 保存
-    print("\n[3/4] Saving report...")
-    report_path = save_report(markdown_report)
+    # 6. 保存
+    print("\n[4/5] Saving report...")
+    save_report(markdown_report)
 
-    # 6. 配信
-    print("\n[4/4] Sending notifications...")
+    # 7. 配信
+    print("\n[5/5] Sending notifications...")
     short = make_short_version(markdown_report)
     one_push = extract_one_push(markdown_report)
     repo_url = os.environ.get("GITHUB_SERVER_URL", "") + "/" + os.environ.get("GITHUB_REPOSITORY", "")
